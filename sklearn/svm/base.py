@@ -155,7 +155,7 @@ class BaseLibSVM(six.with_metaclass(ABCMeta, BaseEstimator)):
                                    else sample_weight, dtype=np.float64)
         solver_type = LIBSVM_IMPL.index(self._impl)
 
-        # input validation: novelty detection models not not use 'y'
+        # input validation: novelty detection models do not use 'y'
         if solver_type not in (2, 5) and X.shape[0] != y.shape[0]:
             raise ValueError("X and y have incompatible shapes.\n" +
                              "X has %s samples, but y has %s." %
