@@ -1345,9 +1345,10 @@ Estimators
    svm.LinearSVR
    svm.NuSVC
    svm.NuSVR
-   svm.OneClassSVM
    svm.SVC
    svm.SVR
+   svm.OneClassSVM
+   svm.SVDD
 
 .. autosummary::
    :toctree: generated/

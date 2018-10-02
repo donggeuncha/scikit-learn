@@ -15,7 +15,7 @@ from sklearn import svm, linear_model, datasets, metrics, base
 from sklearn.model_selection import train_test_split
 from sklearn.datasets import make_classification, make_blobs
 from sklearn.metrics import f1_score
-from sklearn.metrics.pairwise import rbf_kernel
+from sklearn.metrics.pairwise import rbf_kernel, polynomial_kernel
 from sklearn.utils import check_random_state
 from sklearn.utils.testing import assert_equal, assert_true, assert_false
 from sklearn.utils.testing import assert_greater, assert_in, assert_less
@@ -288,6 +288,150 @@ def test_oneclass_score_samples():
     clf = svm.OneClassSVM(gamma=1).fit(X_train)
     assert_array_equal(clf.score_samples([[2., 2.]]),
                        clf.decision_function([[2., 2.]]) + clf.offset_)
+
+
+def test_svdd():
+    # Test the output of libsvm for the SVDD problem with default parameters
+    clf = svm.SVDD(gamma='scale')
+    clf.fit(X)
+    pred = clf.predict(T)
+
+    assert_array_equal(pred, [-1, -1, -1])
+    assert_equal(pred.dtype, np.dtype('intp'))
+    assert_array_almost_equal(clf.intercept_, [0.383], decimal=3)
+    assert_array_almost_equal(clf.dual_coef_,
+                              [[0.681, 0.139, 0.680, 0.140, 0.680, 0.680]],
+                              decimal=3)
+    assert_false(hasattr(clf, "coef_"))
+
+
+def test_svdd_decision_function():
+    # For the RBF (stationary) kernel the SVDD and the OneClass SVM
+    #  are identical. Therefore here the test is run on a non-stationary
+    #  kernel.
+
+    # Test SVDD decision function
+    rnd = check_random_state(2)
+
+    # Generate train data
+    X = 0.3 * rnd.randn(100, 2)
+    X_train = np.r_[X + 2, X - 2]
+
+    # Generate some regular novel observations
+    X = 0.3 * rnd.randn(20, 2)
+    X_test = np.r_[X + 2, X - 2]
+
+    # Generate some abnormal novel observations
+    X_outliers = rnd.uniform(low=-4, high=4, size=(20, 2))
+
+    # fit the model
+    clf = svm.SVDD(gamma='scale', nu=0.1,
+                   kernel="poly", degree=2, coef0=1.0).fit(X_train)
+
+    # predict and validate things
+    y_pred_test = clf.predict(X_test)
+    assert_greater(np.mean(y_pred_test == 1), .9)
+
+    y_pred_outliers = clf.predict(X_outliers)
+    assert_greater(np.mean(y_pred_outliers == -1), .8)
+
+    dec_func_test = clf.decision_function(X_test)
+    assert_array_equal((dec_func_test > 0).ravel(), y_pred_test == 1)
+
+    dec_func_outliers = clf.decision_function(X_outliers)
+    assert_array_equal((dec_func_outliers > 0).ravel(), y_pred_outliers == 1)
+
+
+def test_svdd_score_samples():
+    # Test the raw sample scores of the SVDD
+    # Background: the theoretical decision function score of the SVDD is
+    #  d(x) = R - \|\phi(x) - a\|^2
+    #       = R - \alpha^T Q \alpha / (\nu W)^2 - K(x, x)
+    #           + 2 / (\nu W) \sum_i \alpha_i K(z_i, x)
+    #       = 2 / (\nu W) (-\rho + \sum_i \alpha_i (K(z_i, x) - 0.5 K(x, x)))
+    # where \rho = 0.5 \nu W (\alpha^T Q \alpha / (\nu W)^2 - R), W is the
+    # sum of sample weights and \sum_i \alpha_i = \nu W since \alpha is
+    # feasible.
+    # In contrast, the current implementation returns a scaled score:
+    #  d(x) = 0.5 (\nu W) (R - \|\phi(x) - a\|^2)
+    #       = -\rho + \sum_i \alpha_i (K(z_i, x) - 0.5 K(x, x))
+    # Implicit scaling makes the raw decision function scores of the ocSVM
+    # and SVDD identical when the models coincide (stationary kernel).
+
+    # Generate train data
+    rnd = check_random_state(2)
+    X = 0.3 * rnd.randn(100, 2)
+    X_train = np.r_[X + 2, X - 2]
+
+    # Evaluate the scores on a small uniform 2-d mesh
+    xx, yy = np.meshgrid(np.linspace(-5, 5, num=26),
+                         np.linspace(-5, 5, num=26))
+    X_test = np.c_[xx.ravel(), yy.ravel()]
+
+    # Fit the model for at least 10% support vectors
+    clf = svm.SVDD(nu=0.1, kernel="poly", gamma='scale', degree=2, coef0=1.0)
+    clf.fit(X_train)
+
+    # Check score_samples() implementation
+    assert_array_almost_equal(clf.score_samples(X_test),
+                              clf.decision_function(X_test) + clf.offset_)
+
+    # Test the gamma="scale"
+    gamma = 1.0 / (X.shape[1] * X_train.std())
+
+    assert_almost_equal(clf._gamma, gamma)
+
+    # Compute the kernel matrices
+    k_zx = polynomial_kernel(X_train[clf.support_], X_test,
+                             gamma=gamma, degree=clf.degree, coef0=clf.coef0)
+    k_xx = polynomial_kernel(X_test, gamma=gamma,
+                             degree=clf.degree, coef0=clf.coef0).diagonal()
+
+    # Compute the sample scores = decision scores without `-\rho`
+    scores_ = np.dot(clf.dual_coef_, k_zx - k_xx[np.newaxis] / 2).ravel()
+    assert_array_almost_equal(clf.score_samples(X_test), scores_)
+
+    # Get the decision function scores
+    decision_ = scores_ + clf.intercept_  # intercept_ = - \rho
+    assert_array_almost_equal(clf.decision_function(X_test), decision_)
+
+
+def test_oneclass_and_svdd():
+    # Generate a sample: two symmetrically placed clusters
+    rnd = check_random_state(2)
+
+    X = 0.3 * rnd.randn(100, 2)
+    X_train = np.r_[X + 2, X - 2]
+
+    # Test the output of libsvm for the SVDD and the One-Class SVM
+    nu = 0.15
+
+    svdd = svm.SVDD(nu=nu, kernel="rbf", gamma="scale")
+    svdd.fit(X_train)
+
+    ocsvm = svm.OneClassSVM(nu=nu, kernel="rbf", gamma="scale")
+    ocsvm.fit(X_train)
+
+    # The intercept of the SVDD differs from that of the One-Class SVM:
+    #   `rho_svdd = (aTQa * (nu * l)^(-2) - R) * (nu * l) / 2` ,
+    # and
+    #   `rho_oc = (C0 + aTQa * (nu * l)^(-2) - R) * (nu * l) / 2` ,
+    # since `R = C0 - 2 rho_oc / (nu l) + aTQa * (nu l)^(-2)`,
+    # where `C0 = K(x,x) = K(x-x)` for a stationary K.
+    # >>> The intercept_ value is negative rho!
+    # For the RBF kernel: K(x,y) = exp(-theta * |x-y|^2), the C0 is 1.
+    C0 = 1.0
+    svdd_intercept = (2 * ocsvm.intercept_ + C0 * (nu * X_train.shape[0])) / 2
+    assert_array_almost_equal(svdd.intercept_, svdd_intercept, decimal=3)
+
+    # Evaluate the decision function on a uniformly spaced 2-d mesh
+    xx, yy = np.meshgrid(np.linspace(-5, 5, num=101),
+                         np.linspace(-5, 5, num=101))
+    mesh = np.c_[xx.ravel(), yy.ravel()]
+
+    svdd_df = svdd.decision_function(mesh)
+    ocsvm_df = ocsvm.decision_function(mesh).ravel()
+    assert_array_almost_equal(svdd_df, ocsvm_df)
 
 
 def test_tweak_params():
@@ -797,6 +941,7 @@ def test_immutable_coef_property():
         svm.SVR(kernel='linear').fit(iris.data, iris.target),
         svm.NuSVR(kernel='linear').fit(iris.data, iris.target),
         svm.OneClassSVM(kernel='linear').fit(iris.data),
+        svm.SVDD(kernel='linear').fit(iris.data),
     ]
     for clf in svms:
         assert_raises(AttributeError, clf.__setattr__, 'coef_', np.arange(3))
